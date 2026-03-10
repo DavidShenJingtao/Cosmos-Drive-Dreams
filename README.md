@@ -32,9 +32,9 @@ https://github.com/user-attachments/assets/43c5b921-ef23-4d5d-8ab4-2a7a58a0cb77
 | **Cosmos-7B-Multiview-AV-Sample** (Paper Sec. [2.1])             | model     | [Huggingface Link](https://huggingface.co/nvidia/Cosmos-Predict1-7B-Text2World-Sample-AV-Multiview) |
 | **Cosmos-Transfer1-7B-Sample-AV** (Paper Sec. [2.2]) | model     | [Huggingface Link](https://huggingface.co/nvidia/Cosmos-Transfer1-7B-Sample-AV) |
 | **Cosmos-7B-Single2Multiview-Sample-AV** (Paper Sec. [2.3])     | model     | [Huggingface Link](https://huggingface.co/nvidia/Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV) |
-| **Cosmos-7B-Annotate-Sample-AV** (Paper Sec. [2.4])        | model     | To be released soon |
 | **Cosmos-7B-LiDAR-GEN-Sample-AV** (Paper Sec. [3])         | model     | [Huggingface link](https://huggingface.co/collections/nvidia/cosmos-drive-dreams) |
 <!---
+| **Cosmos-7B-Annotate-Sample-AV** (Paper Sec. [2.4])        | model     | To be released soon |
 | **Cosmos Toolkit**                | SDG tool   | [Cosmos Drive Dreams Toolkits](https://github.com/nv-tlabs/Cosmos-Drive-Dreams/tree/main/cosmos-drive-dreams-toolkits) |
 | **RDS-HQ Dataset Subset**        | dataset    | [Huggingface Dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicle-Cosmos-Drive-Dreams) |
 | **Cosmos-Drive-Dreams Dataset**     | dataset    | [Huggingface Dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicle-Cosmos-Drive-Dreams) |
