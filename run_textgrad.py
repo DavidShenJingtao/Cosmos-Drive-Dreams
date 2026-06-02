@@ -1,4 +1,10 @@
 import os
+
+if "OPENAI_API_KEY" not in os.environ:
+    raise RuntimeError("OPENAI_API_KEY is not set")
+
+os.environ["OPENAI_BASE_URL"] = "https://openrouter.ai/api/v1"
+
 import json
 import subprocess
 import torch
@@ -7,22 +13,38 @@ import textgrad as tg
 # -------------------------------------------------------------
 # 1. SETUP THE TEXTGRAD OPTIMIZER ENGINE
 # -------------------------------------------------------------
-# Using gpt-4o as the core text engine that computes gradients and steps
-engine = tg.EngineVLM(model_string="gpt-4o")
+llm_engine = tg.get_engine("openai/gpt-4o")
+tg.set_backward_engine("openai/gpt-4o", override=True)
 
-# Load your baseline driving prompt from your assets directory
-with open("assets/example/captions/2d23a1f4-c269-46aa-8e7d-1bb595d1e421_2445376400000_2445396400000.txt", "r") as f:
-    initial_prompt_text = f.read().strip()
-
-# Declare the prompt as a trainable TextGrad Variable
-scenario_prompt = tg.Variable(
-    initial_prompt_text, 
-    requires_grad=True, 
-    role_description="Text prompt specifying weather, lightning, and traffic anomalies for video generation"
+# Define your initial baseline system prompt strategy
+initial_prompt_text = (
+    "You are a scenario designer for a driving world model. Based on the structural layout "
+    "provided in the input, expand it into a detailed description specifying standard daylight conditions, "
+    "straightforward traffic flows, and optimal weather."
 )
 
-# Instantiate the Textual Gradient Descent (TGD) Optimizer
-optimizer = tg.TGD(parameters=[scenario_prompt], engine=engine)
+# Declare the prompt as a trainable TextGrad Variable
+system_prompt = tg.Variable(
+    initial_prompt_text, 
+    requires_grad=True, 
+    role_description="system prompt to guide the LLM's scenario synthesis strategy for long-tail scenario generation"
+)
+
+model = tg.BlackboxLLM(llm_engine, system_prompt=system_prompt)
+
+optimizer_system_prompt = (
+    "You are a Textual Gradient Descent engine updating a text variable. "
+    "You will receive a variable, its description, and feedback gradients. "
+    "Your ONLY job is to output the updated, rewritten version of the text variable. "
+    "CRITICAL: Do not output lists of bullet points, suggestions, meta-criticisms, or wrapped feedback text. "
+    "Do not use tags like <FEEDBACK>. You MUST strictly place the updated string inside the tags requested by the user prompt."
+)
+
+optimizer = tg.TGD(
+    parameters=list(model.parameters()),
+    engine=llm_engine, # Explicitly bind your gpt-4o engine instance
+    optimizer_system_prompt=optimizer_system_prompt
+)
 
 
 # -------------------------------------------------------------
@@ -39,9 +61,8 @@ def run_cosmos_front_view_generation(prompt_string, num_frames=24):
     with open("outputs/captions/optimized_scenario.json", "w") as f:
         json.dump(caption_payload, f)
     
-    # CRITICAL VRAM MITIGATION: Force Cosmos to render a very short sequence 
-    # during the optimization phase. (e.g., 24 or 32 frames instead of 121)
-    # Check your Cosmos configuration args to specify lower frame sequences.
+    # CRITICAL VRAM MITIGATION: Force Cosmos to render a short sequence (e.g., 24 frames)
+    # during the optimization phase to avoid local CUDA Out-of-Memory crashes.
     subprocess.run([
         "python", "scripts/generate_video_single_view.py",
         "--caption_path", "outputs/captions",
@@ -49,88 +70,100 @@ def run_cosmos_front_view_generation(prompt_string, num_frames=24):
         "--video_save_folder", "outputs/single_view",
         "--checkpoint_dir", "checkpoints/",
         "--is_av_sample",
-        "--controlnet_specs", "assets/sample_av_hdmap_spec.json"
-    ], stdout=subprocess.DEVNULL) # Suppress heavy logs
+        "--controlnet_specs", "assets_av_hdmap_spec.json"
+    ], stdout=subprocess.DEVNULL) 
     
-    # Return path to the rendered front-view video asset
     return "outputs/single_view/optimized_scenario.mp4"
 
 
 # -------------------------------------------------------------
-# 3. DEFINE CRITIQUE LLMS / EVALUATORS (THE LOSS NODES)
+# 3. CONSTRUCT THE TEXTGRAD CRITIQUE LOSS NODE (Fixed)
 # -------------------------------------------------------------
-# Setup loop evaluators using TextGrad's BlackboxLLM component
-loop_a_perception_evaluator = tg.BlackboxLLM(
-    system_prompt=(
-        "You are an autonomous driving perception critic. Analyze the telemetry data "
-        "and tracking performance matrices of an AV system executing on a scenario. "
-        "Your goal is to find visual exploits. Provide constructive criticism outlining "
-        "why the current environment failed to confuse the object detector or tracker, "
-        "and what precise hazardous visual details should be integrated to force a model failure."
-    ),
-    engine=engine
+# Define the strict TextLoss constraints OUTSIDE the function loop.
+# This ensures it stays consistently anchored inside TextGrad's execution graph.
+evaluation_instruction = (
+    "You are a critical safety audit engine. Evaluate the generated scenario prompt description variable.\n"
+    "You will also review accompanying autonomous vehicle tracking performance logs and a targeted safety risk domain.\n\n"
+    "CRITERIA:\n"
+    "1. If the AV perception tracking is working smoothly and perfectly, the scenario has failed to expose a vulnerability.\n"
+    "2. If the scene lacks realistic, heavy environmental impairments, it has failed to hit the target risk envelope.\n"
+    "Provide precise, constructive criticism outlining what extreme visual parameters, weather artifacts, or "
+    "occlusions need to be explicitly appended to the scenario generation strategy to force system degradation."
 )
+loss_fn = tg.TextLoss(evaluation_instruction)
 
-loop_b_guidance_evaluator = tg.BlackboxLLM(
-    system_prompt=(
-        "You are an environmental consistency safety manager. Your target long-tail distribution "
-        "is: 'A severe torrential downpour at dusk causing high water sprays from heavy trucks, "
-        "resulting in wet asphalt surface glare and low boundary visibility.' "
-        "Evaluate the visual description of the scene and provide a harsh text critique detailing "
-        "how the prompt must be updated to align closer with this targeted risk distribution."
-    ),
-    engine=engine
-)
 
 # -------------------------------------------------------------
-# 4. EXECUTE THE CLOSED-LOOP OPTIMIZATION
+# 4. RUN THE OPTIMIZATION LOOP
 # -------------------------------------------------------------
+# Define a representative map instance from your Step 1 assets
+hdmap_layout_instance = (
+    "The video shows a highway scene during twilight or early evening, with a clear sky "
+    "transitioning from blue to darker shades. Several cars are visible on the road, some "
+    "moving forward while others appear stationary, indicating moderate traffic. The road is "
+    "flanked by trees and a concrete barrier on one side, with utility poles and wires running "
+    "parallel to the highway. A billboard is visible in the distance, and the overall atmosphere "
+    "suggests a calm urban or suburban setting. The lighting indicates that it is either dusk "
+    "or dawn, with the sky showing signs of fading light."
+)
+question = tg.Variable(hdmap_layout_instance, role_description="the target baseline HDMap condition to simulate", requires_grad=False)
+
+# Define your target long-tail risk profile
+target_hazard = "A heavy torrential downpour at dusk creating severe blinding asphalt glare and major vehicle water spray."
+
 num_iterations = 3
 
 for iteration in range(num_iterations):
     optimizer.zero_grad()
-    print(f"\n--- Starting Optimization Step {iteration + 1} ---")
-    print(f"Current Prompt Condition: {scenario_prompt.value}\n")
+    print(f"\n--- TextGrad Prompt Optimization Iteration {iteration + 1} ---")
     
-    # Forward Pass Part 1: Render video via local hardware
-    video_output_path = run_cosmos_front_view_generation(scenario_prompt.value, num_frames=24)
+    # Step A: Generate specific prompt variation based on current parameters
+    prediction = model(question)
+    print(f"Current System Output Prediction:\n{prediction.value}\n")
     
-    # Forward Pass Part 2: Evaluate the video outputs
-    # (Optional: Pass the video to a local 3D detector/lane tracker first, collect metrics text)
-    # For simplicity, we summarize video frames or provide metrics here:
-    av_perception_metrics = "Lane Tracker: 98% confidence. Object BBox: Pedestrian tracked perfectly."
-    visual_scene_telemetry = "The scene appears as clear asphalt with minor rain effects. High visibility."
+    # Step B: Render the short video snippet locally
+    video_output = run_cosmos_front_view_generation(prediction.value, num_frames=24)
     
-    # Feed evaluations into our TextGrad Loss functions
-    loss_a = loop_a_perception_evaluator(tg.Variable(av_perception_metrics, role_description="AV perception performance telemetry"))
-    loss_b = loop_b_guidance_evaluator(tg.Variable(visual_scene_telemetry, role_description="Visual layout observations"))
+    # Step C: Pack evaluation measurements into static TextGrad Variables (requires_grad=False)
+    # (In production, replace this placeholder with programmatic metrics parsed from your trackers)
+    av_tracker_metrics = "System Telemetry: Pedestrians and lane markers tracked with 99% accuracy. Zero tracking lag detected."
     
-    # Aggregate into a single master evaluation Loss node
-    composite_loss_text = (
-        f"Perception Failure Criterion (Loop A): {loss_a.value}\n"
-        f"Target Domain Adherence Criterion (Loop B): {loss_b.value}"
+    perception_log_var = tg.Variable(av_tracker_metrics, role_description="downstream AV tracking telemetry data", requires_grad=False)
+    target_domain_var = tg.Variable(target_hazard, role_description="the required target hazard envelope", requires_grad=False)
+    
+    # Step D: Construct a compound input container for TextLoss evaluation
+    # This feeds all context variables into the graph alongside your prediction node
+    combined_loss_input = (
+        f"Generated Scene Description: {prediction}\n"
+        f"Downstream System Metrics: {perception_log_var}\n"
+        f"Target Domain Envelope: {target_domain_var}"
     )
-    total_loss = tg.Variable(composite_loss_text, role_description="Composite Guided Adversarial Prompt Loss")
+    loss_node = tg.Variable(combined_loss_input, role_description="aggregated execution state for safety evaluation")
     
-    # Backward Pass: TextGrad computes textual gradients via API backpropagation
-    print("Computing natural language gradients...")
-    total_loss.backward()
+    # Compute the textual loss score object
+    loss = loss_fn(loss_node)
+    print(f"Computed Feedback Loss:\n{loss.value}\n")
     
-    # Clear local VRAM cache immediately before TextGrad performs its update step
+    # Step E: Backward pass propagates feedback back to system_prompt parameters
+    print("Computing gradients on system parameter layers...")
+    loss.backward()
+    
+    # Evacuate PyTorch memory footprints to avoid memory collisions with Cosmos
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         
-    # Optimizer Step: TGD mutates the prompt variable based on textual gradients
+    # Step F: Update system parameters (updates system_prompt string instructions)
     optimizer.step()
 
 # -------------------------------------------------------------
-# 5. ESCAPE TO FULL-SCALE SYNTHETIC DATA GENERATION
+# 5. EXECUTE PRODUCTION GENERATION
 # -------------------------------------------------------------
-print("\n=== Prompt Optimization Complete! ===")
-print(f"Final Optimized Long-Tail Prompt:\n{scenario_prompt.value}\n")
+print("\n=== SYSTEM OPTIMIZATION EXECUTION STEP COMPLETE ===")
+print(f"Final Optimized System Prompt Parameter:\n{system_prompt.value}\n")
 
-# Run the final output sequence one time at full 121-frame layout capacity 
-print("Generating final 121-frame, high-quality front view...")
-run_cosmos_front_view_generation(scenario_prompt.value, num_frames=121)
+print("Generating final long-tail risk video utilizing optimal instructions...")
+final_production_prediction = model(question)
 
-print("Pipeline optimized. You are now safe to run Step 4 (Multi-view video expansion).")
+# Generate full-length high quality asset safely now that training loops are complete
+run_cosmos_front_view_generation(final_production_prediction.value, num_frames=121)
+print("Pipeline run complete. Proceed to Step 4 for surrounding multiview expansion.")
