@@ -46,6 +46,12 @@ optimizer = tg.TGD(
     optimizer_system_prompt=optimizer_system_prompt
 )
 
+# -------------------------------------------------------------
+# AUTOMATED ROOT ABSOLUTE PATH RESOLUTION
+# -------------------------------------------------------------
+# Discovers the absolute root path to /home/jingtao/Cosmos-Drive-Dreams
+CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+COSMOS_WORKSPACE_ROOT = os.path.dirname(CURRENT_SCRIPT_DIR) 
 
 # -------------------------------------------------------------
 # 2. BLACK-BOX SIMULATOR WRAPPER (COSMOS FRONT-VIEW)
@@ -55,14 +61,25 @@ def run_cosmos_front_view_generation(prompt_string, num_frames=24):
     Saves the current prompt string to the expected cosmos workspace
     and invokes the front-view single-camera generator script.
     """
-    # Write optimized prompt out to the JSON format Cosmos expects
     caption_payload = {"caption": prompt_string}
-    os.makedirs("outputs/captions", exist_ok=True)
-    with open("outputs/captions/optimized_scenario.json", "w") as f:
+    
+    # 1. ALWAYS write files relative to the workspace root directory
+    captions_dir = os.path.join(COSMOS_WORKSPACE_ROOT, "outputs/captions")
+    os.makedirs(captions_dir, exist_ok=True)
+    
+    caption_file_path = os.path.join(captions_dir, "optimized_scenario.json")
+    with open(caption_file_path, "w") as f:
         json.dump(caption_payload, f)
     
-    # CRITICAL VRAM MITIGATION: Force Cosmos to render a short sequence (e.g., 24 frames)
-    # during the optimization phase to avoid local CUDA Out-of-Memory crashes.
+    # 2. Capture and prepare system environmental paths
+    env = os.environ.copy()
+    
+    # Register both the workspace root and the target folder inside PYTHONPATH
+    env["PYTHONPATH"] = f"{COSMOS_WORKSPACE_ROOT}:{os.path.join(COSMOS_WORKSPACE_ROOT, 'cosmos-transfer1')}:{env.get('PYTHONPATH', '')}"
+    
+    # 3. FIX OS CHDIR CRASH: Force the subprocess to run from the root directory.
+    # When the script tries to run `os.chdir("cosmos-transfer1")`, it will look at 
+    # the root level, find the folder, and enter it without throwing a FileNotFoundError.
     subprocess.run([
         "python", "scripts/generate_video_single_view.py",
         "--caption_path", "outputs/captions",
@@ -70,10 +87,10 @@ def run_cosmos_front_view_generation(prompt_string, num_frames=24):
         "--video_save_folder", "outputs/single_view",
         "--checkpoint_dir", "checkpoints/",
         "--is_av_sample",
-        "--controlnet_specs", "assets_av_hdmap_spec.json"
-    ], stdout=subprocess.DEVNULL) 
+        "--controlnet_specs", "assets/sample_av_hdmap_spec.json"
+    ], cwd=COSMOS_WORKSPACE_ROOT, env=env, stdout=subprocess.DEVNULL) 
     
-    return "outputs/single_view/optimized_scenario.mp4"
+    return os.path.join(COSMOS_WORKSPACE_ROOT, "outputs/single_view/optimized_scenario.mp4")
 
 
 # -------------------------------------------------------------
@@ -97,15 +114,14 @@ loss_fn = tg.TextLoss(evaluation_instruction)
 # 4. RUN THE OPTIMIZATION LOOP
 # -------------------------------------------------------------
 # Define a representative map instance from your Step 1 assets
-hdmap_layout_instance = (
-    "The video shows a highway scene during twilight or early evening, with a clear sky "
-    "transitioning from blue to darker shades. Several cars are visible on the road, some "
-    "moving forward while others appear stationary, indicating moderate traffic. The road is "
-    "flanked by trees and a concrete barrier on one side, with utility poles and wires running "
-    "parallel to the highway. A billboard is visible in the distance, and the overall atmosphere "
-    "suggests a calm urban or suburban setting. The lighting indicates that it is either dusk "
-    "or dawn, with the sky showing signs of fading light."
+caption_file = (
+    "../assets/example/captions/"
+    "2d23a1f4-c269-46aa-8e7d-1bb595d1e421_2445376400000_2445396400000.txt"
 )
+
+with open(caption_file, "r") as f:
+    hdmap_layout_instance = f.read().strip()
+
 question = tg.Variable(hdmap_layout_instance, role_description="the target baseline HDMap condition to simulate", requires_grad=False)
 
 # Define your target long-tail risk profile
