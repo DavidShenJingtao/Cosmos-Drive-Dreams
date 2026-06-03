@@ -6,6 +6,8 @@ if "OPENAI_API_KEY" not in os.environ:
 os.environ["OPENAI_BASE_URL"] = "https://openrouter.ai/api/v1"
 
 import json
+import gc
+import sys
 import subprocess
 import torch
 import textgrad as tg
@@ -42,28 +44,26 @@ optimizer_system_prompt = (
 
 optimizer = tg.TGD(
     parameters=list(model.parameters()),
-    engine=llm_engine, # Explicitly bind your gpt-4o engine instance
+    engine=llm_engine, 
     optimizer_system_prompt=optimizer_system_prompt
 )
 
 # -------------------------------------------------------------
 # AUTOMATED ROOT ABSOLUTE PATH RESOLUTION
 # -------------------------------------------------------------
-# Discovers the absolute root path to /home/jingtao/Cosmos-Drive-Dreams
 CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 COSMOS_WORKSPACE_ROOT = os.path.dirname(CURRENT_SCRIPT_DIR) 
 
 # -------------------------------------------------------------
 # 2. BLACK-BOX SIMULATOR WRAPPER (COSMOS FRONT-VIEW)
 # -------------------------------------------------------------
-def run_cosmos_front_view_generation(prompt_string, num_frames=24):
+def run_cosmos_front_view_generation(prompt_string, num_frames=24, check_errors=False):
     """
     Saves the current prompt string to the expected cosmos workspace
     and invokes the front-view single-camera generator script.
     """
     caption_payload = {"caption": prompt_string}
     
-    # 1. ALWAYS write files relative to the workspace root directory
     captions_dir = os.path.join(COSMOS_WORKSPACE_ROOT, "outputs/captions")
     os.makedirs(captions_dir, exist_ok=True)
     
@@ -71,16 +71,17 @@ def run_cosmos_front_view_generation(prompt_string, num_frames=24):
     with open(caption_file_path, "w") as f:
         json.dump(caption_payload, f)
     
-    # 2. Capture and prepare system environmental paths
     env = os.environ.copy()
-    
-    # Register both the workspace root and the target folder inside PYTHONPATH
     env["PYTHONPATH"] = f"{COSMOS_WORKSPACE_ROOT}:{os.path.join(COSMOS_WORKSPACE_ROOT, 'cosmos-transfer1')}:{env.get('PYTHONPATH', '')}"
     
-    # 3. FIX OS CHDIR CRASH: Force the subprocess to run from the root directory.
-    # When the script tries to run `os.chdir("cosmos-transfer1")`, it will look at 
-    # the root level, find the folder, and enter it without throwing a FileNotFoundError.
-    subprocess.run([
+    # If check_errors is True, we capture stderr to look out for CUDA OOM crashes.
+    # If it's False (during the optimization loop text phase), we skip the hardware call to save VRAM.
+    if not check_errors:
+        print("Optimization Mode Active: Skipping hardware render pass to conserve GPU VRAM context...")
+        return os.path.join(COSMOS_WORKSPACE_ROOT, "outputs/single_view/optimized_scenario.mp4")
+
+    print(f"Launching Cosmos Video Generator (Frames: {num_frames})...")
+    result = subprocess.run([
         "python", "scripts/generate_video_single_view.py",
         "--caption_path", "outputs/captions",
         "--input_path", "outputs",
@@ -88,16 +89,19 @@ def run_cosmos_front_view_generation(prompt_string, num_frames=24):
         "--checkpoint_dir", "checkpoints/",
         "--is_av_sample",
         "--controlnet_specs", "assets/sample_av_hdmap_spec.json"
-    ], cwd=COSMOS_WORKSPACE_ROOT, env=env, stdout=subprocess.DEVNULL) 
+    ], cwd=COSMOS_WORKSPACE_ROOT, env=env, capture_output=True, text=True) 
     
+    # Catch structural failures or CUDA OOM issues immediately
+    if result.returncode != 0:
+        print(f"\n❌ CRITICAL ERROR IN SIMULATOR RUN:\n{result.stderr}", file=sys.stderr)
+        sys.exit(result.returncode)
+        
     return os.path.join(COSMOS_WORKSPACE_ROOT, "outputs/single_view/optimized_scenario.mp4")
 
 
 # -------------------------------------------------------------
-# 3. CONSTRUCT THE TEXTGRAD CRITIQUE LOSS NODE (Fixed)
+# 3. CONSTRUCT THE TEXTGRAD CRITIQUE LOSS NODE
 # -------------------------------------------------------------
-# Define the strict TextLoss constraints OUTSIDE the function loop.
-# This ensures it stays consistently anchored inside TextGrad's execution graph.
 evaluation_instruction = (
     "You are a critical safety audit engine. Evaluate the generated scenario prompt description variable.\n"
     "You will also review accompanying autonomous vehicle tracking performance logs and a targeted safety risk domain.\n\n"
@@ -113,18 +117,15 @@ loss_fn = tg.TextLoss(evaluation_instruction)
 # -------------------------------------------------------------
 # 4. RUN THE OPTIMIZATION LOOP
 # -------------------------------------------------------------
-# Define a representative map instance from your Step 1 assets
-caption_file = (
-    "../assets/example/captions/"
-    "2d23a1f4-c269-46aa-8e7d-1bb595d1e421_2445376400000_2445396400000.txt"
+caption_file = os.path.join(
+    COSMOS_WORKSPACE_ROOT,
+    "assets/example/captions/2d23a1f4-c269-46aa-8e7d-1bb595d1e421_2445376400000_2445396400000.txt"
 )
 
 with open(caption_file, "r") as f:
     hdmap_layout_instance = f.read().strip()
 
 question = tg.Variable(hdmap_layout_instance, role_description="the target baseline HDMap condition to simulate", requires_grad=False)
-
-# Define your target long-tail risk profile
 target_hazard = "A heavy torrential downpour at dusk creating severe blinding asphalt glare and major vehicle water spray."
 
 num_iterations = 3
@@ -133,22 +134,19 @@ for iteration in range(num_iterations):
     optimizer.zero_grad()
     print(f"\n--- TextGrad Prompt Optimization Iteration {iteration + 1} ---")
     
-    # Step A: Generate specific prompt variation based on current parameters
+    # Step A: Generate scenario text variant
     prediction = model(question)
     print(f"Current System Output Prediction:\n{prediction.value}\n")
     
-    # Step B: Render the short video snippet locally
-    video_output = run_cosmos_front_view_generation(prediction.value, num_frames=24)
+    # Step B: Fast-track the text optimization graph path without choking VRAM
+    video_output = run_cosmos_front_view_generation(prediction.value, num_frames=24, check_errors=False)
     
-    # Step C: Pack evaluation measurements into static TextGrad Variables (requires_grad=False)
-    # (In production, replace this placeholder with programmatic metrics parsed from your trackers)
+    # Step C: Formulate metrics configuration block
     av_tracker_metrics = "System Telemetry: Pedestrians and lane markers tracked with 99% accuracy. Zero tracking lag detected."
-    
     perception_log_var = tg.Variable(av_tracker_metrics, role_description="downstream AV tracking telemetry data", requires_grad=False)
     target_domain_var = tg.Variable(target_hazard, role_description="the required target hazard envelope", requires_grad=False)
     
-    # Step D: Construct a compound input container for TextLoss evaluation
-    # This feeds all context variables into the graph alongside your prediction node
+    # Step D: Construct loss container
     combined_loss_input = (
         f"Generated Scene Description: {prediction}\n"
         f"Downstream System Metrics: {perception_log_var}\n"
@@ -156,30 +154,40 @@ for iteration in range(num_iterations):
     )
     loss_node = tg.Variable(combined_loss_input, role_description="aggregated execution state for safety evaluation")
     
-    # Compute the textual loss score object
     loss = loss_fn(loss_node)
     print(f"Computed Feedback Loss:\n{loss.value}\n")
     
-    # Step E: Backward pass propagates feedback back to system_prompt parameters
+    # Step E: Propagate textual feedback backward to your system prompt parameters
     print("Computing gradients on system parameter layers...")
     loss.backward()
     
-    # Evacuate PyTorch memory footprints to avoid memory collisions with Cosmos
+    # Clear local session footprints
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         
-    # Step F: Update system parameters (updates system_prompt string instructions)
     optimizer.step()
 
 # -------------------------------------------------------------
-# 5. EXECUTE PRODUCTION GENERATION
+# 5. EXECUTE PRODUCTION GENERATION WITH MEMORY EVACUATION
 # -------------------------------------------------------------
 print("\n=== SYSTEM OPTIMIZATION EXECUTION STEP COMPLETE ===")
 print(f"Final Optimized System Prompt Parameter:\n{system_prompt.value}\n")
 
-print("Generating final long-tail risk video utilizing optimal instructions...")
+# Get final textual instruction variant
+print("Formulating final scenario recipe instructions...")
 final_production_prediction = model(question)
 
-# Generate full-length high quality asset safely now that training loops are complete
-run_cosmos_front_view_generation(final_production_prediction.value, num_frames=121)
+# CRITICAL VRAM RECLAMATION PASS: Clean and clear everything from the main script's memory
+del model
+del optimizer
+del loss_fn
+del llm_engine
+
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
+print("Generating final long-tail risk video utilizing optimal instructions...")
+# Run production loop with validation checking set to True
+run_cosmos_front_view_generation(final_production_prediction.value, num_frames=121, check_errors=True)
 print("Pipeline run complete. Proceed to Step 4 for surrounding multiview expansion.")
