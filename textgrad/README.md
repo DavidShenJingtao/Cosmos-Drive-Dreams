@@ -2,7 +2,7 @@
 
 ## Quick start
 
-Before running `python run_textgrad.py`, execute the following commands:
+Before running `python run_production.py`, execute the following commands:
 1. move to `textgrad` directory
 2. `conda activate cosmos-drive-dreams`
 3. `export OPENAI_API_KEY=<your API key>`
